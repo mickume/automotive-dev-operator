@@ -59,6 +59,10 @@ var (
 
 	// deploy flags
 	artifactMappings []string
+
+	// sync flags
+	gitTrackedOnly bool
+	syncDelete     bool
 )
 
 // NewWorkspaceCmd creates the workspace command with subcommands.
@@ -205,18 +209,30 @@ Examples:
 }
 
 func newSyncCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "sync <name> [directory]",
 		Short: "Upload local source directory to a workspace",
 		Long: `Sync uploads a local directory to the workspace's /workspace/src/ path.
 If no directory is specified, the current directory is used.
 
+By default, all files in the directory are included except those excluded by
+.gitignore. Use --git-tracked-only to sync only files that have been committed
+or staged with git add.
+
+Use --delete to remove files from the workspace that no longer exist locally
+(similar to rsync --delete). Without this flag, stale files are left in place.
+
 Examples:
   caib workspace sync my-app ./src
-  caib workspace sync my-app`,
+  caib workspace sync my-app
+  caib workspace sync my-app --git-tracked-only
+  caib workspace sync my-app --delete`,
 		Args: cobra.RangeArgs(1, 2),
 		Run:  runSync,
 	}
+	cmd.Flags().BoolVar(&gitTrackedOnly, "git-tracked-only", false, "sync only git-tracked files (committed or staged)")
+	cmd.Flags().BoolVar(&syncDelete, "delete", false, "remove files from workspace that no longer exist locally")
+	return cmd
 }
 
 func newExecCmd() *cobra.Command {
@@ -517,16 +533,19 @@ func runSync(_ *cobra.Command, args []string) {
 		handleError(fmt.Errorf("source directory does not exist or is not a directory: %s", absDir))
 	}
 
-	files, err := gitTrackedFiles(absDir)
+	files, err := gitListFiles(absDir, gitTrackedOnly)
 	if err != nil {
-		handleError(fmt.Errorf("failed to list git-tracked files: %w", err))
+		handleError(fmt.Errorf("failed to list files: %w", err))
 	}
 	if len(files) == 0 {
-		handleError(fmt.Errorf("no git-tracked files found in %s", absDir))
+		handleError(fmt.Errorf("no files found in %s", absDir))
 	}
 
 	manifest := computeManifest(absDir, files)
-	planReq := buildapitypes.SyncPlanRequest{Files: manifest}
+	planReq := buildapitypes.SyncPlanRequest{
+		Files:          manifest,
+		IncludeDeleted: syncDelete,
+	}
 
 	var plan *buildapitypes.SyncPlanResponse
 	err = caibcommon.ExecuteWithReauth(serverURL, &authToken, insecureSkipTLS, func(client *buildapiclient.Client) error {
@@ -540,19 +559,40 @@ func runSync(_ *cobra.Command, args []string) {
 	if err != nil {
 		// Fall back to full sync — warn so users know why delta didn't work
 		fmt.Fprintf(os.Stderr, "Warning: sync plan unavailable (%v), uploading all files\n", err)
-		clilog.Infof("Syncing %d tracked files to workspace %q...\n", len(files), name)
-		uploadFiles(name, absDir, files)
+		clilog.Infof("Syncing %d files to workspace %q...\n", len(files), name)
+		if syncDelete {
+			uploadFilesClean(name, absDir, files)
+		} else {
+			uploadFiles(name, absDir, files)
+		}
 		return
 	}
 
-	if len(plan.Changed) == 0 {
+	if len(plan.Changed) == 0 && len(plan.Deleted) == 0 {
 		clilog.Infof("Workspace %q is up to date (%d files)\n", name, plan.Unchanged)
 		return
 	}
 
-	clilog.Infof("Syncing %d changed files to workspace %q (%d unchanged)...\n",
-		len(plan.Changed), name, plan.Unchanged)
-	uploadFiles(name, absDir, plan.Changed)
+	if len(plan.Changed) > 0 {
+		clilog.Infof("Syncing %d changed files to workspace %q (%d unchanged)...\n",
+			len(plan.Changed), name, plan.Unchanged)
+		uploadFiles(name, absDir, plan.Changed)
+	}
+
+	if syncDelete && len(plan.Deleted) > 0 {
+		for _, f := range plan.Deleted {
+			fmt.Fprintf(os.Stderr, "  delete: %s\n", f)
+		}
+		clilog.Infof("Removing %d stale file(s) from workspace %q...\n", len(plan.Deleted), name)
+		deleteReq := buildapitypes.SyncDeleteRequest{Files: plan.Deleted}
+		err = caibcommon.ExecuteWithReauth(serverURL, &authToken, insecureSkipTLS, func(client *buildapiclient.Client) error {
+			return client.SyncDelete(context.Background(), name, deleteReq)
+		})
+		if err != nil {
+			handleError(fmt.Errorf("failed to delete stale files: %w", err))
+		}
+		clilog.Infoln("Stale files removed")
+	}
 }
 
 func uploadFiles(name, absDir string, files []string) {
@@ -577,18 +617,42 @@ func uploadFiles(name, absDir string, files []string) {
 	clilog.Infoln("Files synced")
 }
 
+func uploadFilesClean(name, absDir string, files []string) {
+	var buf bytes.Buffer
+	if err := tarTrackedFiles(absDir, files, &buf); err != nil {
+		handleError(fmt.Errorf("failed to create tar archive: %w", err))
+	}
+
+	totalBytes := int64(buf.Len())
+	archive := buf.Bytes()
+
+	var pr *progressReader
+	err := caibcommon.ExecuteWithReauth(serverURL, &authToken, insecureSkipTLS, func(client *buildapiclient.Client) error {
+		pr = newProgressReader(bytes.NewReader(archive), totalBytes)
+		err := client.SyncWorkspaceClean(context.Background(), name, pr)
+		pr.finish()
+		return err
+	})
+	if err != nil {
+		handleError(fmt.Errorf("failed to sync workspace: %w", err))
+	}
+	clilog.Infoln("Files synced (clean)")
+}
+
 func computeManifest(baseDir string, files []string) map[string]string {
 	manifest := make(map[string]string, len(files))
 	for _, relPath := range files {
 		absPath := filepath.Join(baseDir, relPath)
 		f, err := os.Open(absPath)
 		if err != nil {
-			continue // file may have been deleted since ls-files
+			fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", relPath, err)
+			continue
 		}
 		h := sha256.New()
 		_, err = io.Copy(h, f)
 		_ = f.Close()
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", relPath, err)
 			continue
 		}
 		manifest[relPath] = hex.EncodeToString(h.Sum(nil))
@@ -596,9 +660,15 @@ func computeManifest(baseDir string, files []string) map[string]string {
 	return manifest
 }
 
-// gitTrackedFiles returns the list of git-tracked files relative to dir.
-func gitTrackedFiles(dir string) ([]string, error) {
-	cmd := exec.Command("git", "ls-files", "--cached", "--exclude-standard")
+// gitListFiles returns files relative to dir. When trackedOnly is true, only
+// git-indexed files are returned. Otherwise both tracked and untracked files
+// are returned, excluding those matched by .gitignore.
+func gitListFiles(dir string, trackedOnly bool) ([]string, error) {
+	args := []string{"ls-files", "--cached", "--exclude-standard"}
+	if !trackedOnly {
+		args = append(args, "--others")
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -622,7 +692,8 @@ func tarTrackedFiles(baseDir string, files []string, w io.Writer) error {
 		absPath := filepath.Join(baseDir, relPath)
 		fi, err := os.Lstat(absPath)
 		if err != nil {
-			continue // file may have been deleted since ls-files
+			fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", relPath, err)
+			continue
 		}
 
 		var linkTarget string

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -395,4 +398,292 @@ func TestProgressReaderQuietMode(t *testing.T) {
 			t.Errorf("expected no output from finish() in quiet mode, got: %s", buf.String())
 		}
 	})
+}
+
+// initTestGitRepo creates a temporary git repo with committed, untracked, and
+// gitignored files, returning the repo directory path.
+func initTestGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@test",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@test",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run("git", "init")
+	run("git", "checkout", "-b", "main")
+
+	// committed file
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("tracked"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("git", "add", "tracked.txt")
+	run("git", "commit", "-m", "initial")
+
+	// untracked file (not git-added, not in .gitignore)
+	if err := os.WriteFile(filepath.Join(dir, "untracked.rpm"), []byte("rpm-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// gitignored file
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("ignored.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.log"), []byte("log"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("git", "add", ".gitignore")
+	run("git", "commit", "-m", "add gitignore")
+
+	return dir
+}
+
+func TestGitListFiles(t *testing.T) {
+	dir := initTestGitRepo(t)
+
+	t.Run("default mode includes untracked non-ignored files", func(t *testing.T) {
+		files, err := gitListFiles(dir, false)
+		if err != nil {
+			t.Fatalf("gitListFiles failed: %v", err)
+		}
+		sort.Strings(files)
+
+		hasTracked := false
+		hasUntracked := false
+		hasIgnored := false
+		for _, f := range files {
+			switch f {
+			case "tracked.txt":
+				hasTracked = true
+			case "untracked.rpm":
+				hasUntracked = true
+			case "ignored.log":
+				hasIgnored = true
+			}
+		}
+
+		if !hasTracked {
+			t.Error("expected tracked.txt in file list")
+		}
+		if !hasUntracked {
+			t.Error("expected untracked.rpm in file list (untracked but not ignored)")
+		}
+		if hasIgnored {
+			t.Error("ignored.log should be excluded by .gitignore")
+		}
+	})
+
+	t.Run("tracked-only mode excludes untracked files", func(t *testing.T) {
+		files, err := gitListFiles(dir, true)
+		if err != nil {
+			t.Fatalf("gitListFiles failed: %v", err)
+		}
+
+		hasTracked := false
+		hasUntracked := false
+		for _, f := range files {
+			switch f {
+			case "tracked.txt":
+				hasTracked = true
+			case "untracked.rpm":
+				hasUntracked = true
+			}
+		}
+
+		if !hasTracked {
+			t.Error("expected tracked.txt in file list")
+		}
+		if hasUntracked {
+			t.Error("untracked.rpm should be excluded in tracked-only mode")
+		}
+	})
+}
+
+func TestComputeManifestWarnsOnSkippedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "good.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	manifest := computeManifest(dir, []string{"good.txt", "nonexistent.txt"})
+
+	_ = w.Close()
+	os.Stderr = old
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	if _, ok := manifest["good.txt"]; !ok {
+		t.Error("expected good.txt in manifest")
+	}
+	if _, ok := manifest["nonexistent.txt"]; ok {
+		t.Error("nonexistent.txt should not be in manifest")
+	}
+	if !strings.Contains(buf.String(), "Warning: skipping nonexistent.txt") {
+		t.Errorf("expected warning for nonexistent file, got: %s", buf.String())
+	}
+}
+
+func TestNewSyncCmdHasDeleteFlag(t *testing.T) {
+	cmd := newSyncCmd()
+
+	f := cmd.Flags().Lookup("delete")
+	if f == nil {
+		t.Fatal("expected --delete flag on sync command")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("expected --delete default to be false, got %q", f.DefValue)
+	}
+
+	gt := cmd.Flags().Lookup("git-tracked-only")
+	if gt == nil {
+		t.Fatal("expected --git-tracked-only flag on sync command")
+	}
+}
+
+func TestSyncPlanRequestIncludeDeleted(t *testing.T) {
+	manifest := map[string]string{"a.go": "abc123"}
+
+	t.Run("IncludeDeleted false by default", func(t *testing.T) {
+		req := buildapitypes.SyncPlanRequest{Files: manifest}
+		if req.IncludeDeleted {
+			t.Error("expected IncludeDeleted to be false by default")
+		}
+	})
+
+	t.Run("IncludeDeleted true when set", func(t *testing.T) {
+		req := buildapitypes.SyncPlanRequest{Files: manifest, IncludeDeleted: true}
+		if !req.IncludeDeleted {
+			t.Error("expected IncludeDeleted to be true")
+		}
+	})
+}
+
+func TestSyncPlanResponseDeletedField(t *testing.T) {
+	t.Run("Deleted field present in response", func(t *testing.T) {
+		resp := buildapitypes.SyncPlanResponse{
+			Changed:   []string{"new.go"},
+			Unchanged: 2,
+			Deleted:   []string{"old.go", "removed.go"},
+		}
+		if len(resp.Deleted) != 2 {
+			t.Errorf("expected 2 deleted files, got %d", len(resp.Deleted))
+		}
+		if resp.Deleted[0] != "old.go" {
+			t.Errorf("expected first deleted file 'old.go', got %q", resp.Deleted[0])
+		}
+	})
+
+	t.Run("Deleted field nil when omitted", func(t *testing.T) {
+		resp := buildapitypes.SyncPlanResponse{
+			Changed:   []string{"a.go"},
+			Unchanged: 1,
+		}
+		if resp.Deleted != nil {
+			t.Errorf("expected Deleted to be nil when not set, got %v", resp.Deleted)
+		}
+	})
+}
+
+func TestSyncDeleteRequestValidation(t *testing.T) {
+	t.Run("valid relative paths", func(t *testing.T) {
+		req := buildapitypes.SyncDeleteRequest{
+			Files: []string{"src/main.go", "pkg/util.go"},
+		}
+		if len(req.Files) != 2 {
+			t.Errorf("expected 2 files, got %d", len(req.Files))
+		}
+	})
+
+	t.Run("JSON round-trip preserves fields", func(t *testing.T) {
+		req := buildapitypes.SyncDeleteRequest{
+			Files: []string{"a.go", "b/c.go"},
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		var decoded buildapitypes.SyncDeleteRequest
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+		if len(decoded.Files) != 2 {
+			t.Errorf("expected 2 files after round-trip, got %d", len(decoded.Files))
+		}
+	})
+}
+
+func TestSyncPlanRequestJSONIncludeDeleted(t *testing.T) {
+	t.Run("IncludeDeleted omitted when false", func(t *testing.T) {
+		req := buildapitypes.SyncPlanRequest{
+			Files: map[string]string{"a.go": "hash1"},
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		if strings.Contains(string(data), "includeDeleted") {
+			t.Error("expected includeDeleted to be omitted from JSON when false")
+		}
+	})
+
+	t.Run("IncludeDeleted present when true", func(t *testing.T) {
+		req := buildapitypes.SyncPlanRequest{
+			Files:          map[string]string{"a.go": "hash1"},
+			IncludeDeleted: true,
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		if !strings.Contains(string(data), `"includeDeleted":true`) {
+			t.Errorf("expected includeDeleted:true in JSON, got: %s", string(data))
+		}
+	})
+}
+
+func TestTarTrackedFilesWarnsOnMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "exists.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	var buf bytes.Buffer
+	err := tarTrackedFiles(dir, []string{"exists.txt", "gone.txt"}, &buf)
+
+	_ = w.Close()
+	os.Stderr = old
+
+	if err != nil {
+		t.Fatalf("tarTrackedFiles failed: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Error("expected tar archive to contain data")
+	}
+
+	var stderrBuf bytes.Buffer
+	_, _ = stderrBuf.ReadFrom(r)
+	if !strings.Contains(stderrBuf.String(), "Warning: skipping gone.txt") {
+		t.Errorf("expected warning for missing file, got: %s", stderrBuf.String())
+	}
 }
