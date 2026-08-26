@@ -857,12 +857,19 @@ func (h *Handler) RunBuild(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	localRefs, refsErr := common.FindLocalFileReferences(string(manifestBytes), filepath.Dir(manifestPath))
-	if refsErr != nil {
-		h.handleError(fmt.Errorf("manifest file reference error: %w", refsErr))
-		return
+	manifestDir := filepath.Dir(manifestPath)
+	req.Manifest = common.NormalizeManifestSourcePaths(req.Manifest, manifestDir)
+
+	var localRefs []map[string]string
+	if *h.opts.Workspace == "" {
+		var refsErr error
+		localRefs, refsErr = common.FindLocalFileReferences(req.Manifest, manifestDir)
+		if refsErr != nil {
+			h.handleError(fmt.Errorf("manifest file reference error: %w", refsErr))
+			return
+		}
+		req.HasLocalFiles = len(localRefs) > 0
 	}
-	req.HasLocalFiles = len(localRefs) > 0
 
 	resp, err := api.CreateBuild(ctx, req)
 	if err != nil {
@@ -1156,12 +1163,19 @@ func (h *Handler) RunBuildDev(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	localRefs, refsErr := common.FindLocalFileReferences(string(manifestBytes), filepath.Dir(manifestPath))
-	if refsErr != nil {
-		h.handleError(fmt.Errorf("manifest file reference error: %w", refsErr))
-		return
+	manifestDir := filepath.Dir(manifestPath)
+	req.Manifest = common.NormalizeManifestSourcePaths(req.Manifest, manifestDir)
+
+	var localRefs []map[string]string
+	if *h.opts.Workspace == "" {
+		var refsErr error
+		localRefs, refsErr = common.FindLocalFileReferences(req.Manifest, manifestDir)
+		if refsErr != nil {
+			h.handleError(fmt.Errorf("manifest file reference error: %w", refsErr))
+			return
+		}
+		req.HasLocalFiles = len(localRefs) > 0
 	}
-	req.HasLocalFiles = len(localRefs) > 0
 
 	resp, err := api.CreateBuild(ctx, req)
 	if err != nil {

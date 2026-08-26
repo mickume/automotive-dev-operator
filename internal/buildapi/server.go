@@ -1220,7 +1220,7 @@ func (a *APIServer) createBuild(c *gin.Context) {
 		return
 	}
 
-	needsUpload := req.HasLocalFiles || manifestNeedsUpload(req.Manifest)
+	needsUpload := req.HasLocalFiles || (req.Workspace == "" && manifestNeedsUpload(req.Manifest))
 
 	if err := validateBuildRequest(&req); err != nil {
 		spanError(span, err)

@@ -3,6 +3,7 @@ package caibcommon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,18 +92,94 @@ content:
     - path: /etc/app.conf
       source_path: ../../configs/app.conf
 `
-	refs, err := FindLocalFileReferences(manifest, "/tmp/manifest-dir")
+	refs, err := FindLocalFileReferences(manifest, "manifests")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(refs) != 2 {
 		t.Fatalf("expected 2 refs, got %d", len(refs))
 	}
-	if refs[0]["source_path"] != "../scripts/prep-image.sh" {
-		t.Errorf("expected source_path '../scripts/prep-image.sh', got %q", refs[0]["source_path"])
+	if refs[0]["source_path"] != "scripts/prep-image.sh" {
+		t.Errorf("expected resolved source_path 'scripts/prep-image.sh', got %q", refs[0]["source_path"])
 	}
-	if refs[1]["source_path"] != "../../configs/app.conf" {
-		t.Errorf("expected source_path '../../configs/app.conf', got %q", refs[1]["source_path"])
+	if refs[1]["source_path"] != filepath.Clean("../configs/app.conf") {
+		t.Errorf("expected resolved source_path '../configs/app.conf', got %q", refs[1]["source_path"])
+	}
+}
+
+func TestNormalizeManifestSourcePaths(t *testing.T) {
+	tests := []struct {
+		name           string
+		manifest       string
+		manifestDir    string
+		wantContain    string
+		wantNotContain string
+	}{
+		{
+			name: "resolves parent-relative source_path",
+			manifest: `content:
+  add_files:
+    - path: /etc/data.bin
+      source_path: ../files/data.bin
+`,
+			manifestDir:    "manifests",
+			wantContain:    "source_path: files/data.bin",
+			wantNotContain: "../files/data.bin",
+		},
+		{
+			name: "resolves parent-relative source (legacy)",
+			manifest: `content:
+  add_files:
+    - path: /etc/data.bin
+      source: ../files/data.bin
+`,
+			manifestDir:    "manifests",
+			wantContain:    "source: files/data.bin",
+			wantNotContain: "../files/data.bin",
+		},
+		{
+			name: "leaves non-parent paths unchanged",
+			manifest: `content:
+  add_files:
+    - path: /usr/bin/app
+      source_path: files/app-binary
+`,
+			manifestDir: "manifests",
+			wantContain: "source_path: files/app-binary",
+		},
+		{
+			name: "leaves absolute paths unchanged",
+			manifest: `content:
+  add_files:
+    - path: /usr/bin/app
+      source_path: /opt/files/app-binary
+`,
+			manifestDir: "manifests",
+			wantContain: "source_path: /opt/files/app-binary",
+		},
+		{
+			name: "handles qm section",
+			manifest: `qm:
+  content:
+    add_files:
+      - path: /etc/qm.conf
+        source_path: ../qm-files/qm.conf
+`,
+			manifestDir:    "manifests",
+			wantContain:    "source_path: qm-files/qm.conf",
+			wantNotContain: "../qm-files/qm.conf",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NormalizeManifestSourcePaths(tt.manifest, tt.manifestDir)
+			if !strings.Contains(got, tt.wantContain) {
+				t.Errorf("expected result to contain %q, got:\n%s", tt.wantContain, got)
+			}
+			if tt.wantNotContain != "" && strings.Contains(got, tt.wantNotContain) {
+				t.Errorf("expected result NOT to contain %q, got:\n%s", tt.wantNotContain, got)
+			}
+		})
 	}
 }
 

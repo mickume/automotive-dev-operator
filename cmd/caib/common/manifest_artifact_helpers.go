@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -96,12 +98,13 @@ func FindLocalFileReferences(manifestContent string, manifestDir string) ([]map[
 			path, hasPath := fileMap["path"].(string)
 			sourcePath, hasSourcePath := fileMap["source_path"].(string)
 			if hasPath && hasSourcePath {
-				if err := isPathSafe(sourcePath); err != nil {
+				resolved := resolveSourcePath(sourcePath, manifestDir)
+				if err := isPathSafe(resolved); err != nil {
 					return err
 				}
 				localFiles = append(localFiles, map[string]string{
 					"path":        path,
-					"source_path": sourcePath,
+					"source_path": resolved,
 				})
 			}
 		}
@@ -126,6 +129,83 @@ func FindLocalFileReferences(manifestContent string, manifestDir string) ([]map[
 	}
 
 	return localFiles, nil
+}
+
+// resolveSourcePath resolves a source_path value. Paths containing ".."
+// are resolved relative to manifestDir so that parent-relative references
+// (e.g. "../files/data.bin" from a manifest in a subdirectory) produce a
+// clean path usable from CWD. Non-parent-relative and absolute paths are
+// returned unchanged.
+func resolveSourcePath(sourcePath, manifestDir string) string {
+	if filepath.IsAbs(sourcePath) {
+		return sourcePath
+	}
+	if !containsParentRef(sourcePath) {
+		return sourcePath
+	}
+	return filepath.Clean(filepath.Join(manifestDir, sourcePath))
+}
+
+func containsParentRef(p string) bool {
+	return slices.Contains(strings.Split(filepath.ToSlash(p), "/"), "..")
+}
+
+// NormalizeManifestSourcePaths resolves parent-relative source_path values
+// (those containing "..") in add_files sections of the manifest YAML.
+// The resolved paths are relative to the workspace root (CWD), not the
+// manifest directory. This ensures the server-side rewrite can prepend a
+// simple base path without dealing with ".." components.
+func NormalizeManifestSourcePaths(manifestContent string, manifestDir string) string {
+	var manifestData map[string]any
+	if err := yaml.Unmarshal([]byte(manifestContent), &manifestData); err != nil {
+		return manifestContent
+	}
+
+	type replacement struct{ old, resolved string }
+	var replacements []replacement
+
+	collectReplacements := func(addFiles []any) {
+		for _, file := range addFiles {
+			fileMap, ok := file.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, key := range []string{"source_path", "source"} {
+				sp, ok := fileMap[key].(string)
+				if !ok || sp == "" || filepath.IsAbs(sp) {
+					continue
+				}
+				if !containsParentRef(sp) {
+					continue
+				}
+				resolved := filepath.Clean(filepath.Join(manifestDir, sp))
+				if resolved != sp {
+					replacements = append(replacements, replacement{old: sp, resolved: resolved})
+				}
+			}
+		}
+	}
+
+	if content, ok := manifestData["content"].(map[string]any); ok {
+		if addFiles, ok := content["add_files"].([]any); ok {
+			collectReplacements(addFiles)
+		}
+	}
+	if qm, ok := manifestData["qm"].(map[string]any); ok {
+		if qmContent, ok := qm["content"].(map[string]any); ok {
+			if addFiles, ok := qmContent["add_files"].([]any); ok {
+				collectReplacements(addFiles)
+			}
+		}
+	}
+
+	result := manifestContent
+	for _, r := range replacements {
+		re := regexp.MustCompile(`(source_path|source)(\s*:\s*['"]?)` + regexp.QuoteMeta(r.old) + `(['"]?)`)
+		result = re.ReplaceAllString(result, "${1}${2}"+r.resolved+"${3}")
+	}
+
+	return result
 }
 
 // expandSourceGlob expands a glob pattern relative to manifestDir and returns

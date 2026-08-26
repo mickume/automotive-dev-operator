@@ -58,6 +58,15 @@ func TestFindManifestNormalizesParentRelativePaths(t *testing.T) {
 	}
 }
 
+func TestFindManifestResolvesAgainstSharedWorkspace(t *testing.T) {
+	if strings.Contains(FindManifestScript, `realpath -m "/manifest-work/`) {
+		t.Fatal("FindManifestScript must resolve source_path against the shared workspace, not /manifest-work/")
+	}
+	if !strings.Contains(FindManifestScript, "SHARED_WS") {
+		t.Fatal("FindManifestScript must use the shared workspace path for source_path resolution")
+	}
+}
+
 func stripGeneratedBlock(script, block string) string {
 	before, after, ok := strings.Cut(script, block)
 	if !ok {
