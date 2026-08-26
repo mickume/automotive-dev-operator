@@ -82,6 +82,30 @@ content:
 	}
 }
 
+func TestFindLocalFileReferences_ParentRelativeSourcePath(t *testing.T) {
+	manifest := `
+content:
+  add_files:
+    - path: /usr/bin/prep-image.sh
+      source_path: ../scripts/prep-image.sh
+    - path: /etc/app.conf
+      source_path: ../../configs/app.conf
+`
+	refs, err := FindLocalFileReferences(manifest, "/tmp/manifest-dir")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs, got %d", len(refs))
+	}
+	if refs[0]["source_path"] != "../scripts/prep-image.sh" {
+		t.Errorf("expected source_path '../scripts/prep-image.sh', got %q", refs[0]["source_path"])
+	}
+	if refs[1]["source_path"] != "../../configs/app.conf" {
+		t.Errorf("expected source_path '../../configs/app.conf', got %q", refs[1]["source_path"])
+	}
+}
+
 func TestFindLocalFileReferences_QMSourcePath(t *testing.T) {
 	manifest := `
 qm:
