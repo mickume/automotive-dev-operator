@@ -65,6 +65,9 @@ func TestFindManifestResolvesAgainstRepoRoot(t *testing.T) {
 	if !strings.Contains(FindManifestScript, "REPO_ROOT") {
 		t.Fatal("FindManifestScript must use REPO_ROOT for source_path resolution")
 	}
+	if !strings.Contains(FindManifestScript, `/workspace/src`) {
+		t.Fatal("FindManifestScript must prefer /workspace/src (workspace-src volume) as repo root for workspace builds")
+	}
 }
 
 func stripGeneratedBlock(script, block string) string {

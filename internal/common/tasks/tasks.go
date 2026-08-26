@@ -986,29 +986,31 @@ func GenerateBuildAutomotiveImageTask(namespace string, buildConfig *BuildConfig
 		},
 	}
 
-	// Add read-only VolumeMount for OCI repo volume to the build-image step.
-	// The actual Volume definition is provided at PipelineRun time via PodTemplate.
+	// workspace-src VolumeMount: provides file:// access to content synced via `caib workspace sync`.
+	// Volume is provided at PipelineRun time via PodTemplate (PVC or emptyDir fallback).
+	// SubPath "src" is required because the workspace PVC root is mounted at /workspace
+	// in the workspace pod, and sync writes into /workspace/src/ — so the files live
+	// under the "src" subdirectory of the PVC.
+	workspaceSrcMount := corev1.VolumeMount{
+		Name:      WorkspaceNameSrc,
+		MountPath: "/workspace/src",
+		SubPath:   "src",
+		ReadOnly:  true,
+	}
+
 	for i := range task.Spec.Steps {
-		if task.Spec.Steps[i].Name == PipelineTaskBuildImage {
+		switch task.Spec.Steps[i].Name {
+		case "find-manifest-file":
+			task.Spec.Steps[i].VolumeMounts = append(task.Spec.Steps[i].VolumeMounts, workspaceSrcMount)
+		case PipelineTaskBuildImage:
 			task.Spec.Steps[i].VolumeMounts = append(task.Spec.Steps[i].VolumeMounts,
 				corev1.VolumeMount{
 					Name:      OCIRepoVolumeName,
 					MountPath: OCIRepoMountPath,
 					ReadOnly:  true,
 				},
-				// workspace-src: provides file:// access to content synced via `caib workspace sync`.
-				// Volume is provided at PipelineRun time via PodTemplate (PVC or emptyDir fallback).
-				// SubPath "src" is required because the workspace PVC root is mounted at /workspace
-				// in the workspace pod, and sync writes into /workspace/src/ — so the files live
-				// under the "src" subdirectory of the PVC.
-				corev1.VolumeMount{
-					Name:      WorkspaceNameSrc,
-					MountPath: "/workspace/src",
-					SubPath:   "src",
-					ReadOnly:  true,
-				},
+				workspaceSrcMount,
 			)
-			break
 		}
 	}
 

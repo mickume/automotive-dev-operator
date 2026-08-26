@@ -40,11 +40,12 @@ fi
 
 cat "$workspace_manifest" > "$workspace_manifest.tmp"
 
-# Determine the repo root within the workspace.
-# Workspace PVCs (from caib workspace upload) store source under src/;
-# upload-only builds place files directly in the shared workspace root.
-if [ -d "$SHARED_WS/src" ]; then
-  REPO_ROOT="$SHARED_WS/src"
+# Determine the repo root for source_path resolution.
+# Workspace builds mount the workspace PVC at /workspace/src (via workspace-src volume);
+# non-workspace builds place files in the shared workspace.
+WS_SRC="/workspace/src"
+if [ -d "$WS_SRC" ] && [ "$(ls -A "$WS_SRC" 2>/dev/null)" ]; then
+  REPO_ROOT="$WS_SRC"
 else
   REPO_ROOT="$SHARED_WS"
 fi
