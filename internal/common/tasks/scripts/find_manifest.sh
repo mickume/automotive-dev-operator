@@ -40,8 +40,23 @@ fi
 
 cat "$workspace_manifest" > "$workspace_manifest.tmp"
 
+# Determine the manifest's original subdirectory within the workspace.
+# When the manifest lives in e.g. manifests/foo.aib.yml, parent-relative
+# source_path values like "../files/data.bin" must be resolved against
+# that subdirectory, not the workspace root.
+MANIFEST_WS_SUBDIR=""
+if [ -d "$SHARED_WS" ]; then
+  orig_manifest=$(find "$SHARED_WS" -name "$manifest_basename" -type f 2>/dev/null | head -n 1)
+  if [ -n "$orig_manifest" ]; then
+    MANIFEST_WS_SUBDIR=$(dirname "${orig_manifest#$SHARED_WS/}")
+    if [ "$MANIFEST_WS_SUBDIR" = "." ]; then
+      MANIFEST_WS_SUBDIR=""
+    fi
+  fi
+fi
+
 # rewrite_add_files_paths rewrites relative source/source_path/source_glob
-# values in add_files to absolute /manifest-work/ paths.
+# values in add_files to absolute paths pointing to the shared workspace.
 # Usage: rewrite_add_files_paths <yq_prefix>
 #   e.g. rewrite_add_files_paths ".content.add_files"
 rewrite_add_files_paths() {
@@ -51,22 +66,38 @@ rewrite_add_files_paths() {
   # source -> source_path (legacy field)
   for idx in $(yq eval "$prefix | to_entries | .[] | select(.value.source != null and .value.text == null) | .key" "$workspace_manifest.tmp"); do
     raw=$(yq eval "${prefix}[$idx].source // \"\"" "$workspace_manifest.tmp")
-    resolved=$(realpath -m "/manifest-work/$raw")
+    resolved=$(resolve_source_path "$raw")
     yq eval -i "${prefix}[$idx].source_path = \"$resolved\"" "$workspace_manifest.tmp"
   done
 
   # source_path (relative only)
   for idx in $(yq eval "$prefix | to_entries | .[] | select(.value.source_path != null and (.value.source_path | test(\"^/\") | not) and .value.text == null) | .key" "$workspace_manifest.tmp"); do
     raw=$(yq eval "${prefix}[$idx].source_path // \"\"" "$workspace_manifest.tmp")
-    resolved=$(realpath -m "/manifest-work/$raw")
+    resolved=$(resolve_source_path "$raw")
     yq eval -i "${prefix}[$idx].source_path = \"$resolved\"" "$workspace_manifest.tmp"
   done
 
   # source_glob: do NOT rewrite to absolute paths.
   # AIB's absolute glob handler strips one extra directory component via
   # dirname(), which breaks preserve_path (e.g. /etc/etc/ instead of /etc/).
-  # Since files are already copied into /manifest-work/ and the manifest lives
-  # there too, relative globs resolve correctly without rewriting.
+  # Since the build step cd's into the shared workspace, relative globs
+  # resolve correctly without rewriting.
+}
+
+resolve_source_path() {
+  raw="$1"
+  case "$raw" in
+    ../*)
+      if [ -n "$MANIFEST_WS_SUBDIR" ]; then
+        realpath -m "$SHARED_WS/$MANIFEST_WS_SUBDIR/$raw"
+      else
+        realpath -m "$SHARED_WS/$raw"
+      fi
+      ;;
+    *)
+      realpath -m "$SHARED_WS/$raw"
+      ;;
+  esac
 }
 
 rewrite_add_files_paths ".content.add_files"
