@@ -58,12 +58,12 @@ func TestFindManifestNormalizesParentRelativePaths(t *testing.T) {
 	}
 }
 
-func TestFindManifestResolvesAgainstSharedWorkspace(t *testing.T) {
+func TestFindManifestResolvesAgainstRepoRoot(t *testing.T) {
 	if strings.Contains(FindManifestScript, `realpath -m "/manifest-work/`) {
-		t.Fatal("FindManifestScript must resolve source_path against the shared workspace, not /manifest-work/")
+		t.Fatal("FindManifestScript must resolve source_path against the repo root, not /manifest-work/")
 	}
-	if !strings.Contains(FindManifestScript, "SHARED_WS") {
-		t.Fatal("FindManifestScript must use the shared workspace path for source_path resolution")
+	if !strings.Contains(FindManifestScript, "REPO_ROOT") {
+		t.Fatal("FindManifestScript must use REPO_ROOT for source_path resolution")
 	}
 }
 

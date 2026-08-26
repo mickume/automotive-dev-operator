@@ -40,18 +40,25 @@ fi
 
 cat "$workspace_manifest" > "$workspace_manifest.tmp"
 
-# Determine the manifest's original subdirectory within the workspace.
+# Determine the repo root within the workspace.
+# Workspace PVCs (from caib workspace upload) store source under src/;
+# upload-only builds place files directly in the shared workspace root.
+if [ -d "$SHARED_WS/src" ]; then
+  REPO_ROOT="$SHARED_WS/src"
+else
+  REPO_ROOT="$SHARED_WS"
+fi
+
+# Determine the manifest's original subdirectory within the repo.
 # When the manifest lives in e.g. manifests/foo.aib.yml, parent-relative
 # source_path values like "../files/data.bin" must be resolved against
-# that subdirectory, not the workspace root.
-MANIFEST_WS_SUBDIR=""
-if [ -d "$SHARED_WS" ]; then
-  orig_manifest=$(find "$SHARED_WS" -name "$manifest_basename" -type f 2>/dev/null | head -n 1)
-  if [ -n "$orig_manifest" ]; then
-    MANIFEST_WS_SUBDIR=$(dirname "${orig_manifest#$SHARED_WS/}")
-    if [ "$MANIFEST_WS_SUBDIR" = "." ]; then
-      MANIFEST_WS_SUBDIR=""
-    fi
+# that subdirectory, not the repo root.
+MANIFEST_REPO_SUBDIR=""
+orig_manifest=$(find "$REPO_ROOT" -name "$manifest_basename" -type f 2>/dev/null | head -n 1)
+if [ -n "$orig_manifest" ]; then
+  MANIFEST_REPO_SUBDIR=$(dirname "${orig_manifest#$REPO_ROOT/}")
+  if [ "$MANIFEST_REPO_SUBDIR" = "." ]; then
+    MANIFEST_REPO_SUBDIR=""
   fi
 fi
 
@@ -88,14 +95,14 @@ resolve_source_path() {
   raw="$1"
   case "$raw" in
     ../*)
-      if [ -n "$MANIFEST_WS_SUBDIR" ]; then
-        realpath -m "$SHARED_WS/$MANIFEST_WS_SUBDIR/$raw"
+      if [ -n "$MANIFEST_REPO_SUBDIR" ]; then
+        realpath -m "$REPO_ROOT/$MANIFEST_REPO_SUBDIR/$raw"
       else
-        realpath -m "$SHARED_WS/$raw"
+        realpath -m "$REPO_ROOT/$raw"
       fi
       ;;
     *)
-      realpath -m "$SHARED_WS/$raw"
+      realpath -m "$REPO_ROOT/$raw"
       ;;
   esac
 }
