@@ -50,12 +50,16 @@ rewrite_add_files_paths() {
 
   # source -> source_path (legacy field)
   for idx in $(yq eval "$prefix | to_entries | .[] | select(.value.source != null and .value.text == null) | .key" "$workspace_manifest.tmp"); do
-    yq eval -i "${prefix}[$idx].source_path = \"/manifest-work/\" + (${prefix}[$idx].source // \"\")" "$workspace_manifest.tmp"
+    raw=$(yq eval "${prefix}[$idx].source // \"\"" "$workspace_manifest.tmp")
+    resolved=$(realpath -m "/manifest-work/$raw")
+    yq eval -i "${prefix}[$idx].source_path = \"$resolved\"" "$workspace_manifest.tmp"
   done
 
   # source_path (relative only)
   for idx in $(yq eval "$prefix | to_entries | .[] | select(.value.source_path != null and (.value.source_path | test(\"^/\") | not) and .value.text == null) | .key" "$workspace_manifest.tmp"); do
-    yq eval -i "${prefix}[$idx].source_path = \"/manifest-work/\" + (${prefix}[$idx].source_path // \"\")" "$workspace_manifest.tmp"
+    raw=$(yq eval "${prefix}[$idx].source_path // \"\"" "$workspace_manifest.tmp")
+    resolved=$(realpath -m "/manifest-work/$raw")
+    yq eval -i "${prefix}[$idx].source_path = \"$resolved\"" "$workspace_manifest.tmp"
   done
 
   # source_glob: do NOT rewrite to absolute paths.
