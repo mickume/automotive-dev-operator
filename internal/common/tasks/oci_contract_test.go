@@ -52,6 +52,12 @@ func TestNoHardcodedOCIStringsInScripts(t *testing.T) {
 	}
 }
 
+func TestFindManifestNormalizesParentRelativePaths(t *testing.T) {
+	if !strings.Contains(FindManifestScript, "realpath") {
+		t.Fatal("FindManifestScript must use realpath to normalize paths with '..' components in add_files source_path rewrites")
+	}
+}
+
 func stripGeneratedBlock(script, block string) string {
 	before, after, ok := strings.Cut(script, block)
 	if !ok {
