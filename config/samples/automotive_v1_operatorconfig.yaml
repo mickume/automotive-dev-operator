@@ -58,7 +58,7 @@ spec:
   #   # interval: "15s"
 
   # BuildAPI configuration for the Build API server
-  buildAPI:
+  # buildAPI:
     # Optional: Authentication configuration for OIDC/JWT providers
     # authentication:
     #   # OIDC client ID for caib CLI
